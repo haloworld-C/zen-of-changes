@@ -1,7 +1,9 @@
 use eframe::egui;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 use std::collections::HashMap;
 use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Yao {
@@ -33,7 +35,6 @@ struct DivinationResult {
     lower: Trigram,
     upper: Trigram,
     moving_line: u8,
-    lines: [Yao; 6], // 从下到上
     hexagram: HexagramData,
 }
 
@@ -104,61 +105,73 @@ fn load_first_available_cjk_font() -> Option<(String, Vec<u8>)> {
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("易经随机卦象演示");
-            ui.label("随机生成三组数字：下爻卦(1-8)、上爻卦(1-8)、主爻(1-6)");
-            ui.add_space(8.0);
+            let available = ui.available_size();
+            ui.add_space((available.y * 0.04).max(8.0));
 
-            if ui.button("生成随机卦").clicked() {
-                self.result = Some(generate_result(&self.table));
-            }
-
-            ui.add_space(12.0);
-
-            if let Some(result) = &self.result {
-                ui.group(|ui| {
-                    ui.label(format!(
-                        "随机数：下爻={}，上爻={}，主爻={}",
-                        result.lower.index, result.upper.index, result.moving_line
-                    ));
-                    ui.label(format!(
-                        "下卦：{} {}    上卦：{} {}",
-                        result.lower.symbol,
-                        result.lower.name,
-                        result.upper.symbol,
-                        result.upper.name
-                    ));
-                    ui.label(format!(
-                        "本卦：{} {}",
-                        result.hexagram.symbol, result.hexagram.name
-                    ));
-                });
-
+            ui.vertical_centered(|ui| {
+                ui.set_max_width((available.x * 0.82).clamp(420.0, 980.0));
+                ui.heading("易经随机卦象演示");
+                ui.label("随机生成三组数字：下爻卦(1-8)、上爻卦(1-8)、主爻(1-6)");
                 ui.add_space(8.0);
-                ui.label("卦象（上到下）：");
-                render_hexagram_lines(ui, result);
 
-                ui.add_space(8.0);
-                ui.separator();
-                ui.label(format!("卦辞：{}", result.hexagram.gua_ci));
-                ui.label(format!(
-                    "主爻爻辞（第{}爻）：{}",
-                    result.moving_line,
-                    result.hexagram.yao_ci[(result.moving_line - 1) as usize]
-                ));
-                ui.label(format!("易传：{}", result.hexagram.yi_zhuan));
-                ui.label(format!("系辞传：{}", result.hexagram.xi_ci_zhuan));
-                ui.label(format!("象传：{}", result.hexagram.xiang_zhuan));
-            } else {
-                ui.label("点击“生成随机卦”开始。");
-            }
+                if ui.button("生成随机卦").clicked() {
+                    self.result = Some(generate_result(&self.table));
+                }
+
+                ui.add_space(12.0);
+
+                if let Some(result) = &self.result {
+                    ui.group(|ui| {
+                        ui.label(format!(
+                            "随机数：下爻={}，上爻={}，主爻={}",
+                            result.lower.index, result.upper.index, result.moving_line
+                        ));
+                        ui.label(format!(
+                            "下卦：{} {}    上卦：{} {}",
+                            result.lower.symbol,
+                            result.lower.name,
+                            result.upper.symbol,
+                            result.upper.name
+                        ));
+                        ui.label(format!(
+                            "本卦：{} {}",
+                            result.hexagram.symbol, result.hexagram.name
+                        ));
+                    });
+
+                    ui.add_space(8.0);
+                    ui.label("卦象（上到下）：");
+                    ui.vertical_centered(|ui| render_hexagram_lines(ui, result));
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(format!("卦辞：{}", result.hexagram.gua_ci));
+                    ui.label(format!(
+                        "主爻爻辞（第{}爻）：{}",
+                        result.moving_line,
+                        result.hexagram.yao_ci[(result.moving_line - 1) as usize]
+                    ));
+                    ui.label(format!("易传：{}", result.hexagram.yi_zhuan));
+                    ui.label(format!("系辞传：{}", result.hexagram.xi_ci_zhuan));
+                    ui.label(format!("象传：{}", result.hexagram.xiang_zhuan));
+                } else {
+                    ui.label("点击“生成随机卦”开始。");
+                }
+            });
         });
     }
 }
 
 fn render_hexagram_lines(ui: &mut egui::Ui, result: &DivinationResult) {
-    for line_no in (1..=6).rev() {
-        let idx = (line_no - 1) as usize;
-        let line = match result.lines[idx] {
+    for (line_no, yao) in [
+        (6, result.upper.lines[2]),
+        (5, result.upper.lines[1]),
+        (4, result.upper.lines[0]),
+        (3, result.lower.lines[2]),
+        (2, result.lower.lines[1]),
+        (1, result.lower.lines[0]),
+    ] {
+        let line = match yao {
             Yao::Yang => "────────",
             Yao::Yin => "────  ────",
         };
@@ -171,21 +184,13 @@ fn render_hexagram_lines(ui: &mut egui::Ui, result: &DivinationResult) {
 }
 
 fn generate_result(table: &HashMap<(u8, u8), HexagramData>) -> DivinationResult {
-    let mut rng = rand::thread_rng();
+    let mut rng = rng_from_current_time();
     let lower_idx = rng.gen_range(1..=8);
     let upper_idx = rng.gen_range(1..=8);
     let moving_line = rng.gen_range(1..=6);
 
     let lower = trigram_by_index(lower_idx);
     let upper = trigram_by_index(upper_idx);
-
-    let mut lines = [Yao::Yin; 6];
-    lines[0] = lower.lines[0];
-    lines[1] = lower.lines[1];
-    lines[2] = lower.lines[2];
-    lines[3] = upper.lines[0];
-    lines[4] = upper.lines[1];
-    lines[5] = upper.lines[2];
 
     let hexagram = table
         .get(&(upper_idx, lower_idx))
@@ -196,9 +201,17 @@ fn generate_result(table: &HashMap<(u8, u8), HexagramData>) -> DivinationResult 
         lower,
         upper,
         moving_line,
-        lines,
         hexagram,
     }
+}
+
+fn rng_from_current_time() -> StdRng {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let seed = (now as u64) ^ ((now >> 64) as u64);
+    StdRng::seed_from_u64(seed)
 }
 
 fn trigram_by_index(i: u8) -> Trigram {
